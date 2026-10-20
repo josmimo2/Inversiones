@@ -2754,15 +2754,13 @@ const MODO = (() => {
     let m = null; try { m = JSON.parse(localStorage.getItem('inv-perfil') || 'null'); } catch (e) {}
     const h = location.hash, limpia = () => history.replaceState(null, '', location.pathname + location.search);
     const dev = /[?&]dev\b/.test(location.search);
-    // desde la 0.2, todo el mundo con cuenta (también el dueño): la cartera de este dispositivo o la de GitHub
-    // se sube a la cuenta en la bienvenida. #github (una vez) y ?dev quedan solo para pruebas.
     if (/[#&]github(?:&|$)/.test(h)) { m = 'github'; limpia(); }
+    else if (/[#&](?:local|dispositivo)(?:&|$)/.test(h)) { m = 'local'; limpia(); }
     else if (/[#&](?:mia|cuenta)(?:&|$)/.test(h)) { m = 'cuenta'; limpia(); }
-    else if (!dev) m = 'cuenta';
-    else if (!['cuenta', 'local', 'github'].includes(m)) m = 'github';
+    else if (!['cuenta', 'local', 'github'].includes(m)) m = dev ? 'github' : 'local';
     localStorage.setItem('inv-perfil', JSON.stringify(m));
     return m;
-  } catch (e) { return 'github'; }
+  } catch (e) { return 'local'; }
 })();
 const PERFIL_LOCAL = MODO !== 'github', PERFIL_CUENTA = MODO === 'cuenta';
 const PRIVADAS = new Set(['inv-bloqueo', 'inv-bloqueo-t', 'inv-cache-enc', 'inv-pend-enc', 'inv-cuenta-enc', 'inv-pend-cuenta', 'inv-token', 'inv-asesor-clave', 'inv-asesor-clave-g', 'inv-asesor-conv', 'inv-asesor-cfg2', 'inv-ia-propio', 'inv-ia-agotados', 'inv-gkey-modo', 'inv-cache-ia', 'inv-oculto', 'inv-proy']);
@@ -3135,19 +3133,24 @@ const GH = {
   },
   url(ruta, ref) { return `https://api.github.com/repos/${CFG.owner}/${CFG.repo}/contents/${ruta}${ref ? '?ref=' + ref : ''}`; },
   raw(ruta, ref) { return `https://raw.githubusercontent.com/${CFG.owner}/${CFG.repo}/${ref}/${ruta}`; },
+  rawBase(ruta, ref) { return `https://raw.githubusercontent.com/charly10sf/inversiones/${ref}/${ruta}`; },
   async leer(ruta, ref = 'main', cache = 'no-store') {
     // devuelve {texto, sha} o null si no existe; lanza error si no hay forma de saberlo.
     // Sin token (los amigos con su cartera en el móvil) va directo a raw: la API sin token solo deja
     // 60 lecturas por hora y no hace falta para leer un repositorio público.
     if (this.token()) try {
       const r = await fetch(this.url(ruta, ref), { headers: this.cab(false), cache });
-      if (r.status === 404) return null;
+      if (r.status === 404 && ref === 'main') return null;
       if (r.ok) { const j = await r.json(); return { texto: j.content ? b64.decTxt(j.content) : await this.leerRaw(ruta, ref), sha: j.sha }; }
     } catch (e) { console.warn(e); }
     const r2 = await fetch(this.raw(ruta, ref) + '?v=' + Date.now(), { cache: 'no-store' });
+    if (r2.ok) return { texto: await r2.text(), sha: null };
+    if (r2.status === 404 && (ref === 'datos' || ref === 'catalogo') && CFG.owner.toLowerCase() !== 'charly10sf') {
+      const r3 = await fetch(this.rawBase(ruta, ref) + '?v=' + Date.now(), { cache: 'no-store' });
+      if (r3.ok) return { texto: await r3.text(), sha: null };
+    }
     if (r2.status === 404) return null;
-    if (!r2.ok) throw new Error('No se pudo leer ' + ruta);
-    return { texto: await r2.text(), sha: null };
+    throw new Error('No se pudo leer ' + ruta);
   },
   async leerRaw(ruta, ref) {
     const r = await fetch(this.url(ruta, ref), { headers: this.cab(true), cache: 'no-store' });
@@ -3547,8 +3550,8 @@ const histDe = (id) => (S.hist && S.hist.instrumentos && S.hist.instrumentos[id]
 async function cargarCatalogo() {
   let txt = null;
   try {
-    const r = await fetch(CFG.dev ? 'dev/catalogo-precios.json' : GH.raw('catalogo-precios.json', 'catalogo') + '?v=' + Math.floor(Date.now() / 3600000), { cache: 'no-cache' });
-    if (r.ok) txt = await r.text();
+    if (CFG.dev) { const r = await fetch('dev/catalogo-precios.json', { cache: 'no-cache' }); if (r.ok) txt = await r.text(); }
+    else { const f = await GH.leer('catalogo-precios.json', 'catalogo', 'no-cache'); if (f) txt = f.texto; }
   } catch (e) { console.warn(e); }
   if (txt) { try { localStorage.setItem('inv-cache-cat', txt); } catch (e) {} } else { try { txt = localStorage.getItem('inv-cache-cat'); } catch (e) {} }
   try { S.cat = txt ? JSON.parse(txt) : null; } catch (e) { S.cat = null; }
@@ -5496,7 +5499,7 @@ async function cargarInforme() {
   let txt = null;
   try {
     if (CFG.dev) { const r = await fetch('dev/informe.json', { cache: 'no-store' }); if (r.ok) txt = await r.text(); }
-    else { const r = await fetch(GH.raw('informe.json', 'datos') + '?v=' + encodeURIComponent(id), { cache: 'no-cache' }).catch(() => null); if (r && r.ok) txt = await r.text(); }
+    else { const f = await GH.leer('informe.json', 'datos', 'no-cache'); if (f) txt = f.texto; }
   } catch (e) { console.warn(e); }
   if (txt) { try { S.informe = JSON.parse(txt); localStorage.setItem('inv-cache-informe', txt); } catch (e) {} }
   else { try { const c = localStorage.getItem('inv-cache-informe'); if (c && !S.informe) S.informe = JSON.parse(c); } catch (e) {} }
@@ -5513,7 +5516,7 @@ async function cargarEscaneo() {
   let txt = null;
   try {
     if (CFG.dev) { const r = await fetch('dev/escaneo.json', { cache: 'no-store' }); if (r.ok) txt = await r.text(); }
-    else { const r = await fetch(GH.raw('escaneo.json', 'datos') + '?v=' + encodeURIComponent(id), { cache: 'no-cache' }).catch(() => null); if (r && r.ok) txt = await r.text(); }
+    else { const f = await GH.leer('escaneo.json', 'datos', 'no-cache'); if (f) txt = f.texto; }
   } catch (e) { console.warn(e); }
   if (txt) { try { S.escaneo = JSON.parse(txt); localStorage.setItem('inv-cache-escaneo', txt); } catch (e) {} }
   else { try { const c = localStorage.getItem('inv-cache-escaneo'); if (c && !S.escaneo) S.escaneo = JSON.parse(c); } catch (e) {} }
@@ -9142,9 +9145,12 @@ function pantallaCuenta(errorTxt = '') {
       <button type="button" class="enlace" id="bOlvido">He olvidado la contraseña</button>
     </form>
     <p class="nota cuenta-priv">La contraseña de la cuenta solo sirve para entrar. Tus cifras van cifradas con otra, la de tu cartera, que no sale de tu dispositivo: ni GrowFolio ni Google pueden leerlas.</p>
+    <div class="otro-perfil"><button type="button" class="enlace" id="bModoLocal">Guardar solo en este dispositivo</button><span>·</span><button type="button" class="enlace" id="bModoGH">Guardar en GitHub</button></div>
     <button type="button" class="enlace ver-intro" id="bIntro">¿Qué es GrowFolio?</button>
     ${selectorIdioma('pie')}
   </div></div>`;
+  if ($('#bModoLocal')) $('#bModoLocal').onclick = () => cambiarPerfil('local');
+  if ($('#bModoGH')) $('#bModoGH').onclick = () => cambiarPerfil('github');
   const err = (t) => { $('#err').textContent = t || ''; };
   const dentro = async () => {
     // ya con sesión: tu cartera de la cuenta (o, si es nueva, la bienvenida)
@@ -9413,12 +9419,16 @@ function pantallaDesbloqueo(errorTxt = '', texto = '') {
 
 /* para que otra persona use la web con su propia cartera, sin GitHub (o para volver a la del repositorio) */
 function htmlOtroPerfil() {
-  if (PERFIL_CUENTA) return `<div class="otro-perfil"><span>${FB.user && FB.user.email ? esc(FB.user.email) : 'Tu cuenta'}</span><button type="button" class="enlace" id="bPerfil">Entrar con otra cuenta</button></div>`;
+  if (PERFIL_CUENTA) return `<div class="otro-perfil"><span>${FB.user && FB.user.email ? esc(FB.user.email) : 'Tu cuenta'}</span><button type="button" class="enlace" id="bPerfil">Entrar con otra cuenta</button><span>·</span><button type="button" class="enlace" id="bPerfilLocal">Solo dispositivo</button></div>`;
   return PERFIL_LOCAL
-    ? `<button type="button" class="enlace otro-perfil" id="bPerfil">Abrir la cartera guardada en GitHub</button>`
-    : `<div class="otro-perfil"><span>¿Eres otra persona?</span><button type="button" class="enlace" id="bPerfil">Crea tu propia cartera en este dispositivo</button></div>`;
+    ? `<div class="otro-perfil"><button type="button" class="enlace" id="bPerfil">Guardar en GitHub</button><span>·</span><button type="button" class="enlace" id="bPerfilCuenta">Usar cuenta en la nube</button></div>`
+    : `<div class="otro-perfil"><button type="button" class="enlace" id="bPerfil">Guardar en este dispositivo</button><span>·</span><button type="button" class="enlace" id="bPerfilCuenta">Usar cuenta en la nube</button></div>`;
 }
-function enlazarOtroPerfil() { const b = $('#bPerfil'); if (b) b.onclick = () => (PERFIL_CUENTA ? cerrarSesion() : cambiarPerfil(!PERFIL_LOCAL)); }
+function enlazarOtroPerfil() {
+  const b = $('#bPerfil'); if (b) b.onclick = () => (PERFIL_CUENTA ? cerrarSesion() : cambiarPerfil(!PERFIL_LOCAL));
+  const bc = $('#bPerfilCuenta'); if (bc) bc.onclick = () => cambiarPerfil('cuenta');
+  const bl = $('#bPerfilLocal'); if (bl) bl.onclick = () => cambiarPerfil('local');
+}
 function pantallaCrear() {
   $('#app').innerHTML = `<div class="pantalla"><form class="caja" id="fCrear">
     <img class="logo" src="icon-192.png" alt="">
@@ -9433,7 +9443,7 @@ function pantallaCrear() {
     <label class="check"><input type="checkbox" id="recordar" checked> Recordar en este dispositivo</label>
     <div class="error" id="err"></div>
     <button class="btn pri" type="submit" id="bCrear">Cifrar y guardar</button>
-    ${PERFIL_LOCAL ? htmlOtroPerfil() : ''}
+    ${htmlOtroPerfil()}
     <button type="button" class="enlace ver-intro" id="bIntro">¿Qué es GrowFolio?</button>
     ${selectorIdioma('pie')}
   </form></div>`;
